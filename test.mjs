@@ -77,7 +77,7 @@ async function runTests() {
   });
 
   server.stderr.on("data", (data) => {
-    // Suppress stderr unless debugging
+    // Uncomment to debug: console.error("STDERR:", data.toString());
   });
 
   function send(method, params = {}) {

@@ -1,6 +1,6 @@
 {
   "name": "cross-claude-mcp",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "MCP server enabling multiple Claude Code instances to communicate and collaborate",
   "type": "module",
   "main": "server.mjs",
@@ -13,7 +13,9 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "better-sqlite3": "^11.7.0"
+    "better-sqlite3": "^11.7.0",
+    "express": "^5.1.0",
+    "pg": "^8.13.0"
   },
   "license": "MIT"
 }
