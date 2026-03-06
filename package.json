@@ -1,7 +1,7 @@
 {
   "name": "cross-claude-mcp",
   "version": "2.0.0",
-  "description": "MCP server enabling multiple Claude Code instances to communicate and collaborate",
+  "description": "MCP server enabling multiple Claude instances to communicate and collaborate across Claude Code, Claude.ai, and Claude Desktop",
   "type": "module",
   "main": "server.mjs",
   "bin": {
@@ -10,6 +10,24 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node test.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "claude-code",
+    "multi-agent",
+    "collaboration",
+    "message-bus",
+    "model-context-protocol"
+  ],
+  "author": "Shield Your Body LLC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rblank9/cross-claude-mcp.git"
+  },
+  "homepage": "https://github.com/rblank9/cross-claude-mcp",
+  "bugs": {
+    "url": "https://github.com/rblank9/cross-claude-mcp/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

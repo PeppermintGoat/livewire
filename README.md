@@ -86,7 +86,7 @@ Add to Claude Code MCP config (`~/.claude.json` or project `.claude/settings.jso
 ```
 
 **Claude.ai**:
-Add as a remote MCP server with URL `https://your-service.up.railway.app/mcp` and your bearer token.
+Add as a custom connector in Settings → Connectors. Use URL `https://your-service.up.railway.app/mcp?api_key=YOUR_TOKEN` (leave OAuth fields empty). Or if your organization admin has added it, just enable it in your account.
 
 **Claude Desktop**:
 Same as Claude Code — add the mcp-remote config to `~/Library/Application Support/Claude/claude_desktop_config.json`.
@@ -101,6 +101,7 @@ Same as Claude Code — add the mcp-remote config to `~/Library/Application Supp
 | `/sse` | GET | Legacy SSE transport |
 | `/messages` | POST | Legacy SSE message endpoint |
 | `/health` | GET | Health check (no auth required) |
+| `/readme` | GET | README as HTML (no auth required) |
 
 ## Usage
 
@@ -155,10 +156,10 @@ The reviewer will see the builder's message and can reply.
 
 Instead of cramming huge tables or plans into messages, use the shared data store:
 
-**Sender** (e.g., SEO Claude):
-> "Share the cannibalization analysis via cross-claude with key 'cannibal-q1'. Then send a message to content-claude telling them it's ready."
+**Sender** (e.g., Data Claude):
+> "Share the analysis via cross-claude with key 'q1-report'. Then send a message to writer-claude telling them it's ready."
 
-**Receiver** (e.g., Content Claude):
+**Receiver** (e.g., Writer Claude):
 > "Check cross-claude messages. Then retrieve the shared data they mentioned."
 
 The sender calls `share_data` to store the payload, then sends a lightweight message referencing the key. The receiver calls `get_shared_data` to pull it on demand. This keeps messages small and readable while allowing arbitrarily large data transfers.
@@ -190,9 +191,9 @@ Claude will call `send_message`, then `wait_for_reply` which blocks (polling eve
 ## Example Workflows
 
 ### Inter-Project Coordination
-1. **SEO Claude** (in seo-command-center) sends a request: "Pages X and Y have keyword cannibalization"
-2. **Content Claude** (in site-composer) checks messages, plans content updates, sends status
-3. **SEO Claude** polls via `wait_for_reply`, sees the plan, confirms or adjusts
+1. **Data Claude** (in analytics project) sends a request: "Pages X and Y are competing for the same keyword"
+2. **Content Claude** (in website project) checks messages, plans content updates, sends status
+3. **Data Claude** polls via `wait_for_reply`, sees the plan, confirms or adjusts
 
 ### Code Review
 1. **Builder** finishes a feature, sends a `request` with file paths and summary
