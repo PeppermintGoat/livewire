@@ -303,7 +303,7 @@ async function startHTTP(db) {
 
   // Bearer token auth middleware (skip for health check)
   app.use((req, res, next) => {
-    if (req.path === "/health") return next();
+    if (req.path === "/health" || req.path === "/readme") return next();
 
     if (API_TOKEN) {
       const authHeader = req.headers.authorization || "";
@@ -415,6 +415,39 @@ async function startHTTP(db) {
     }
 
     await session.transport.handlePostMessage(req, res, req.body);
+  });
+
+  // --- README (no auth, public docs) ---
+
+  app.get("/readme", async (req, res) => {
+    const { readFileSync } = await import("fs");
+    const { join, dirname } = await import("path");
+    const { fileURLToPath } = await import("url");
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const md = readFileSync(join(__dirname, "README.md"), "utf-8");
+
+    // Simple markdown-to-HTML conversion
+    const escaped = md
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+      .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+      .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/^- (.+)$/gm, '<li>$1</li>')
+      .replace(/\n\n/g, '</p><p>')
+      .replace(/\n/g, '<br>');
+
+    res.type("html").send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cross-Claude MCP</title>
+<style>body{max-width:800px;margin:40px auto;padding:0 20px;font-family:-apple-system,system-ui,sans-serif;line-height:1.6;color:#333}
+code{background:#f4f4f4;padding:2px 6px;border-radius:3px;font-size:0.9em}
+pre{background:#f4f4f4;padding:16px;border-radius:6px;overflow-x:auto}
+h1{border-bottom:2px solid #eee;padding-bottom:8px}h2{border-bottom:1px solid #eee;padding-bottom:4px;margin-top:2em}
+table{border-collapse:collapse;width:100%}th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background:#f4f4f4}
+li{margin:4px 0}</style></head>
+<body><p>${escaped}</p></body></html>`);
   });
 
   // --- Health check ---
