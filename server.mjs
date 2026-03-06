@@ -54,6 +54,56 @@ db.prepare(
   `INSERT OR IGNORE INTO channels (name, description) VALUES ('general', 'Default channel for cross-instance communication')`
 ).run();
 
+// --- Process-level instance tracking ---
+
+let currentInstanceId = null;
+const STALE_THRESHOLD_SECONDS = 120;
+
+function markOffline(instanceId) {
+  if (!instanceId) return;
+  try {
+    db.prepare(
+      `UPDATE instances SET status = 'offline' WHERE instance_id = ?`
+    ).run(instanceId);
+  } catch {
+    // DB may already be closed during shutdown
+  }
+}
+
+function touchHeartbeat() {
+  if (!currentInstanceId) return;
+  try {
+    db.prepare(
+      `UPDATE instances SET last_seen = datetime('now'), status = 'online' WHERE instance_id = ?`
+    ).run(currentInstanceId);
+  } catch {
+    // Ignore errors during shutdown
+  }
+}
+
+function markStaleInstancesOffline() {
+  db.prepare(
+    `UPDATE instances SET status = 'offline'
+     WHERE status = 'online'
+       AND last_seen < datetime('now', '-${STALE_THRESHOLD_SECONDS} seconds')`
+  ).run();
+}
+
+// Clean shutdown: mark this instance offline
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  process.on(signal, () => {
+    markOffline(currentInstanceId);
+    process.exit(0);
+  });
+}
+
+// Also handle normal exit and stdin close (Claude Code closed)
+process.on("exit", () => markOffline(currentInstanceId));
+process.stdin.on("end", () => {
+  markOffline(currentInstanceId);
+  process.exit(0);
+});
+
 // --- Prepared Statements ---
 
 const stmts = {
@@ -130,6 +180,11 @@ server.tool(
     description: z.string().optional().describe("What this instance is working on"),
   },
   async ({ instance_id, description }) => {
+    // If re-registering with a different id, mark old one offline
+    if (currentInstanceId && currentInstanceId !== instance_id) {
+      markOffline(currentInstanceId);
+    }
+    currentInstanceId = instance_id;
     stmts.registerInstance.run(instance_id, description || null);
     return {
       content: [
@@ -159,7 +214,7 @@ server.tool(
   async ({ channel, sender, content, message_type, in_reply_to }) => {
     // Auto-create channel if needed
     stmts.createChannel.run(channel, null);
-    stmts.heartbeat.run(sender);
+    touchHeartbeat();
 
     const result = stmts.sendMessage.run(channel, sender, content, message_type, in_reply_to || null);
     return {
@@ -184,6 +239,7 @@ server.tool(
     instance_id: z.string().optional().describe("Your instance_id - if provided, filters out your own messages"),
   },
   async ({ channel, after_id, limit, instance_id }) => {
+    touchHeartbeat();
     let messages;
     if (instance_id && after_id !== undefined) {
       messages = stmts.getUnread.all(channel, after_id, instance_id);
@@ -283,6 +339,8 @@ server.tool(
   "See all Claude Code instances that have registered.",
   {},
   async () => {
+    touchHeartbeat();
+    markStaleInstancesOffline();
     const instances = stmts.listInstances.all();
     if (instances.length === 0) {
       return { content: [{ type: "text", text: "No instances registered yet." }] };
