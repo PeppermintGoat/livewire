@@ -4,7 +4,7 @@
 
 import { Router } from "express";
 import { randomUUID } from "crypto";
-import { requireAdmin, generateCsrfToken } from "./auth.mjs";
+import { requireAdmin, generateCsrfToken, hashPassword } from "./auth.mjs";
 
 function escHtml(s) {
   if (!s) return "";
@@ -128,6 +128,11 @@ export function createAdminRouter(db) {
   router.get("/tenants", async (req, res) => {
     try {
       const tenants = await db.listTenants();
+      const csrf = generateCsrfToken(req.session);
+      const flash = req.session.adminFlash || null;
+      req.session.adminFlash = null;
+      const flashHtml = flash ? `<div style="padding:12px 16px;border-radius:6px;margin-bottom:16px;font-size:0.9em;background:${flash.type === 'success' ? '#d4edda;color:#155724;border:1px solid #c3e6cb' : '#f8d7da;color:#721c24;border:1px solid #f5c6cb'}">${escHtml(flash.text)}</div>` : "";
+
       const rows = tenants.map(t => `
         <tr>
           <td><a href="/admin/tenants/${escHtml(t.id)}">${escHtml(t.email)}</a></td>
@@ -141,16 +146,85 @@ export function createAdminRouter(db) {
 
       res.type("html").send(adminLayout("Tenants", `
         <h1>Tenants</h1>
+        ${flashHtml}
         <div class="card">
           <table>
             <thead><tr><th>Email</th><th>Name</th><th>Plan</th><th>Status</th><th>Msgs/Mo</th><th>Signup</th></tr></thead>
             <tbody>${rows || '<tr><td colspan="6">No tenants yet.</td></tr>'}</tbody>
           </table>
         </div>
+
+        <h2>Create Tenant</h2>
+        <div class="card">
+          <form method="POST" action="/admin/tenants/create">
+            <input type="hidden" name="_csrf" value="${csrf}">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div>
+                <label style="display:block;font-weight:600;font-size:0.9em;margin-bottom:4px">Email *</label>
+                <input type="email" name="email" required style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px">
+              </div>
+              <div>
+                <label style="display:block;font-weight:600;font-size:0.9em;margin-bottom:4px">Name</label>
+                <input type="text" name="name" style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px">
+              </div>
+              <div>
+                <label style="display:block;font-weight:600;font-size:0.9em;margin-bottom:4px">Plan</label>
+                <select name="plan" style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px">
+                  <option value="free">Free</option>
+                  <option value="starter">Starter</option>
+                  <option value="pro">Pro</option>
+                </select>
+              </div>
+              <div>
+                <label style="display:block;font-weight:600;font-size:0.9em;margin-bottom:4px">Password *</label>
+                <input type="password" name="password" required minlength="8" style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px">
+              </div>
+            </div>
+            <div style="margin-top:12px">
+              <button class="btn-primary btn-small">Create Tenant</button>
+            </div>
+          </form>
+        </div>
       `));
     } catch (err) {
       console.error("Admin tenants error:", err);
       res.status(500).send("Error loading tenants.");
+    }
+  });
+
+  // --- Create tenant ---
+
+  router.post("/tenants/create", async (req, res) => {
+    try {
+      const { email, name, plan, password } = req.body;
+
+      if (!email || !password) {
+        req.session.adminFlash = { type: "error", text: "Email and password are required." };
+        return res.redirect("/admin/tenants");
+      }
+
+      const existing = await db.getTenantByEmail(email.toLowerCase().trim());
+      if (existing) {
+        req.session.adminFlash = { type: "error", text: "An account with that email already exists." };
+        return res.redirect("/admin/tenants");
+      }
+
+      const id = randomUUID();
+      const apiKey = `cc_${randomUUID().replace(/-/g, "")}`;
+      const passwordHash = await hashPassword(password);
+
+      await db.createTenant(id, email.toLowerCase().trim(), passwordHash, name || null, apiKey);
+      if (plan && plan !== "free") {
+        await db.updateTenant(id, { plan });
+      }
+      await db.seedTenantChannel(id);
+
+      req.session.adminFlash = { type: "success", text: `Tenant created: ${email} (${plan || "free"}) — API key: ${apiKey}` };
+      res.redirect("/admin/tenants");
+    } catch (err) {
+      console.error("Create tenant error:", err);
+      req.session.adminFlash = { type: "error", text: "Failed to create tenant." };
+      res.redirect("/admin/tenants");
     }
   });
 
