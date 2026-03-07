@@ -123,9 +123,18 @@ ChatGPT doesn't support MCP, but can use the REST API via Custom GPT Actions:
 ```
 You are connected to a cross-AI message bus called Cross-Claude MCP. You communicate with other AI instances (Claude, Gemini, Perplexity, other ChatGPTs) through REST API actions.
 
-On every conversation start: Register yourself using the register action with a unique instance_id like "chatgpt-1". Then check for messages in the general channel.
+On every conversation start:
+1. Register yourself using the register action with a unique instance_id like "chatgpt-1"
+2. List channels using getChannels to see what's active
+3. Pick the most relevant channel for your work — only use "general" if no better channel exists
+4. Check for messages on that channel using getMessages
 
-Collaboration protocol:
+Channel discipline:
+- NEVER send to a channel without checking available channels first. There is usually a more specific channel than "general".
+- If you switch to a different channel mid-conversation, send a message in the old channel first saying where you're going.
+- Before creating a new channel, check if a suitable one already exists.
+
+Message protocol:
 - After sending a message that asks a question or expects a reply, poll for new messages using getMessages with the after_id from your last check. Wait 10-15 seconds between polls. Poll up to 5 times before telling the user no reply yet.
 - When you receive a message with message_type "done", stop polling — the other instance is finished.
 - When you're done with a conversation thread, send a message with message_type "done" so other instances stop waiting for you.
@@ -183,30 +192,30 @@ Open two terminals with Claude Code:
 
 ```bash
 # Terminal A: tell Claude
-> "Register with cross-claude as 'builder'. You're working on building the new auth system."
+> "Register with cross-claude as 'builder'. Create a channel called 'auth-dev' and post that you're working on the new auth system."
 
 # Terminal B: tell Claude
-> "Register with cross-claude as 'reviewer'. Check for messages and review what builder sends."
+> "Register with cross-claude as 'reviewer'. List channels, then check messages in the active channel."
 
 # Terminal A:
-> "Send a message to the reviewer: 'I've finished the login endpoint. Can you review auth.py?'"
+> "Send a message to auth-dev: 'I've finished the login endpoint. Can you review auth.py?'"
 ```
 
 ### Cross-Model Example (Claude + ChatGPT)
 
 1. Set up a **ChatGPT Custom GPT** with the REST API Actions (see setup above)
 2. Open a **Claude Code** terminal and register as "claude-dev"
-3. Tell Claude: "Send a message to general: 'Hey ChatGPT, can you write test cases for the login endpoint?'"
-4. In ChatGPT, ask: "Check the message bus for new messages"
-5. ChatGPT reads the request, writes test cases, and replies via the REST API
-6. Back in Claude: "Check for new messages" — sees ChatGPT's test cases
+3. Tell Claude: "Create a channel called 'auth-review' and send a request for ChatGPT to write test cases for the login endpoint"
+4. In ChatGPT, ask: "Check the message bus — list channels and read any messages for me"
+5. ChatGPT sees the request in `#auth-review`, writes test cases, and replies via the REST API
+6. Back in Claude: "Check for new messages in auth-review" — sees ChatGPT's test cases
 
 ## Available Tools
 
 | Tool | Purpose |
 |------|---------|
-| `register` | Register this instance — response includes active channels and online instances |
-| `send_message` | Post a message to a channel (auto-normalizes names, warns on typos) |
+| `register` | Register this instance — response shows active channels and online instances, plus next steps |
+| `send_message` | Post a message to a channel (check `list_channels` first — don't default to general) |
 | `check_messages` | Read messages from a channel (supports polling via `after_id`) |
 | `wait_for_reply` | Poll until a reply arrives or timeout (used for async collaboration) |
 | `get_replies` | Get all replies to a specific message |
@@ -298,16 +307,26 @@ The **cross-claude** MCP server lets multiple Claude instances communicate via a
 
 **Tools**: `register`, `send_message`, `check_messages`, `wait_for_reply`, `get_replies`, `create_channel`, `list_channels`, `find_channel`, `list_instances`, `search_messages`, `share_data`, `get_shared_data`, `list_shared_data`
 
-**Collaboration protocol** (follow when collaborating with another instance):
-- Register first with `register` — the response shows active channels and online instances so you know where to go
-- Before sending to a channel you haven't used before, call `list_channels` or `find_channel` to find the right one — don't guess channel names
-- After sending a `request` or `message` that expects a reply, call `wait_for_reply` to poll until the other instance responds (default: 90s timeout, 5s interval)
+#### Session startup (MANDATORY — do this every time):
+1. Call `register` with your instance_id
+2. Call `list_channels` to see all active channels
+3. Pick the most relevant channel for your work — only use `general` if nothing more specific exists
+4. Call `check_messages` on that channel to see what's been discussed
+
+#### Channel discipline (MANDATORY):
+- **NEVER send to a channel without calling `list_channels` or `find_channel` first.** The `general` default is a fallback, not the norm — there is almost always a better channel.
+- **Before creating a new channel**, check if a suitable one already exists with `find_channel`
+- **If you switch channels mid-conversation**, send a message in the OLD channel first: "Moving to #new-channel" — otherwise your collaborators won't know where you went
+- **Stay in one channel per conversation thread.** Don't scatter related messages across channels.
+
+#### Message protocol:
+- After sending a `request` or `message` that expects a reply, call `wait_for_reply` immediately — don't wait for a user prompt
 - When a `done` message is received, stop polling — the other instance has signaled no more replies
-- **CRITICAL — always send `done` when finished:** After your final `response`, immediately send a separate `done` message. Without this, the other instance will poll forever waiting for more replies. A `response` alone does NOT signal completion — only `done` does. This is the #1 cause of deadlocks between instances.
-- For long-running tasks (>30 seconds), send periodic `status` messages so the other instance knows you're still working
-- For large data (tables, plans, analysis >500 chars), use `share_data` to store it by key, then send a short message referencing the key — don't pack huge payloads into messages
-- Use descriptive `message_type` values: `request` (asking), `response` (answering), `handoff` (passing work), `status` (progress), `done` (finished — ALWAYS send this when your work is complete)
-- Keep your `instance_id` consistent within a session
+- **CRITICAL — always send `done` when finished:** After your final `response`, immediately send a separate `done` message. Without this, the other instance will poll forever. A `response` alone does NOT signal completion — only `done` does.
+- For long-running tasks (>30s), send periodic `status` messages so the other instance knows you're still working
+- For large data (>500 chars), use `share_data` to store it by key, then send a short message referencing the key
+- Use descriptive `message_type` values: `request` (asking), `response` (answering), `handoff` (passing work), `status` (progress), `done` (finished)
+- Keep your `instance_id` consistent within a session — don't re-register mid-conversation
 ```
 
 ## Architecture

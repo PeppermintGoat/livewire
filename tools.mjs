@@ -64,7 +64,7 @@ export function registerTools(server, db, planChecker = null) {
         ? "\n\nActive channels:\n" + activeChannels.map(c =>
             `  #${c.name} (${c.message_count} msgs, last: ${c.last_message_at})${c.description ? ` - ${c.description}` : ""}`
           ).join("\n")
-        : "\n\nNo active channels yet. Use 'general' or create a new one.";
+        : "\n\nNo active channels yet. Create a topic-specific channel with 'create_channel', or use 'general' for initial contact.";
 
       await db.markStaleOffline(STALE_THRESHOLD_SECONDS);
       const instances = await db.listInstances();
@@ -76,16 +76,16 @@ export function registerTools(server, db, planChecker = null) {
         : "\n\nNo other instances online.";
 
       return {
-        content: [{ type: "text", text: `Registered as "${instance_id}".${channelSummary}${instanceSummary}\n\nUse 'check_messages' to see if anyone has sent you anything.` }],
+        content: [{ type: "text", text: `Registered as "${instance_id}".${channelSummary}${instanceSummary}\n\nNEXT STEPS: Call 'list_channels' to find the right channel for your work, then 'check_messages' on that channel. Do NOT default to 'general' if a more specific channel exists.` }],
       };
     }
   );
 
   server.tool(
     "send_message",
-    "Send a message to a channel for other Claude Code instances to read.",
+    "Send a message to a channel for other instances to read. IMPORTANT: Before your first send in a session, call list_channels or find_channel to pick the right channel. Do NOT default to 'general' without checking — there is usually a more specific channel. If you move to a different channel mid-conversation, notify your collaborators in the old channel first.",
     {
-      channel: z.string().default("general").describe("Channel to post to (default: 'general')"),
+      channel: z.string().default("general").describe("Channel to post to. Check list_channels first — only use 'general' if no better channel exists"),
       sender: z.string().describe("Your instance_id"),
       content: z.string().describe("The message content"),
       message_type: z.enum(["message", "request", "response", "status", "handoff", "done"]).default("message")
@@ -134,9 +134,9 @@ export function registerTools(server, db, planChecker = null) {
 
   server.tool(
     "check_messages",
-    "Check for new messages in a channel. Use after_id to only get messages newer than a specific message.",
+    "Check for new messages in a channel. Use after_id to only get messages newer than a specific message. If you're unsure which channel to check, call list_channels first.",
     {
-      channel: z.string().default("general").describe("Channel to check"),
+      channel: z.string().default("general").describe("Channel to check — call list_channels first if unsure"),
       after_id: z.number().optional().describe("Only show messages after this ID (for polling)"),
       limit: z.number().default(20).describe("Max messages to return"),
       instance_id: z.string().optional().describe("Your instance_id - filters out your own messages"),
@@ -259,7 +259,7 @@ export function registerTools(server, db, planChecker = null) {
 
   server.tool(
     "list_channels",
-    "List all channels with activity stats (message count, last activity, participants). Use this to find the right channel before sending messages.",
+    "List all channels with activity stats (message count, last activity, participants). CALL THIS before your first send_message in any session to find the right channel.",
     {},
     async () => {
       const channels = await db.listChannelsWithActivity();
