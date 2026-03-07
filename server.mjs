@@ -305,6 +305,7 @@ async function startHTTP(db) {
   const { randomUUID } = await import("crypto");
 
   const app = express();
+  app.set("trust proxy", 1); // Railway terminates SSL at the edge
   const PORT = parseInt(process.env.PORT) || 3000;
   const saas = isSaasMode();
 
