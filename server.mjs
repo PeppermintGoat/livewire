@@ -6,18 +6,25 @@
  * Modes (auto-detected):
  * - Local (stdio + SQLite): when no PORT env var is set
  * - Remote (HTTP + PostgreSQL): when PORT and DATABASE_URL are set (Railway)
+ * - SaaS (HTTP + PostgreSQL + Stripe): when STRIPE_SECRET_KEY is also set
  *
  * Remote endpoints:
- * - POST /mcp — Streamable HTTP (Claude.ai, Claude Code via mcp-remote, Claude Desktop)
- * - GET  /mcp — SSE stream for Streamable HTTP
- * - GET  /sse — Legacy SSE transport (backward compat)
- * - POST /messages — Legacy SSE message endpoint
- * - GET  /health — Health check
+ * - POST /mcp -- Streamable HTTP (Claude.ai, Claude Code via mcp-remote, Claude Desktop)
+ * - GET  /mcp -- SSE stream for Streamable HTTP
+ * - GET  /sse -- Legacy SSE transport (backward compat)
+ * - POST /messages -- Legacy SSE message endpoint
+ * - GET  /health -- Health check
+ *
+ * SaaS endpoints (only when STRIPE_SECRET_KEY is set):
+ * - GET/POST /signup, /login, /logout, /dashboard
+ * - POST /api/billing/checkout, /api/billing/portal
+ * - POST /api/billing/webhook (raw body)
+ * - GET  /admin, /admin/tenants, /admin/tenants/:id
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createDB } from "./db.mjs";
+import { createDB, isSaasMode, TenantDB } from "./db.mjs";
 
 const STALE_THRESHOLD_SECONDS = 120;
 
@@ -132,7 +139,7 @@ function registerTools(server, db) {
           ).join("\n\n---\n\n");
           const lastId = messages[messages.length - 1].id;
           return {
-            content: [{ type: "text", text: `${messages.length} new message(s) in #${channel}:\n\n${formatted}\n\n---\nLast message ID: ${lastId}${hasDone ? "\n\nThe other instance signaled DONE — no further replies expected." : ""}` }],
+            content: [{ type: "text", text: `${messages.length} new message(s) in #${channel}:\n\n${formatted}\n\n---\nLast message ID: ${lastId}${hasDone ? "\n\nThe other instance signaled DONE -- no further replies expected." : ""}` }],
           };
         }
 
@@ -242,7 +249,7 @@ function registerTools(server, db) {
       const data = await db.getSharedData(key);
       if (!data) return { content: [{ type: "text", text: `No shared data found for key "${key}". Use list_shared_data to see available keys.` }] };
       return {
-        content: [{ type: "text", text: `Shared data "${key}" (by ${data.created_by}, ${data.created_at})${data.description ? ` — ${data.description}` : ""}:\n\n${data.content}` }],
+        content: [{ type: "text", text: `Shared data "${key}" (by ${data.created_by}, ${data.created_at})${data.description ? ` -- ${data.description}` : ""}:\n\n${data.content}` }],
       };
     }
   );
@@ -257,7 +264,7 @@ function registerTools(server, db) {
       if (items.length === 0) return { content: [{ type: "text", text: "No shared data stored yet." }] };
       const formatted = items.map((d) => {
         const sizeKb = (Number(d.size_bytes) / 1024).toFixed(1);
-        return `"${d.key}" (${sizeKb} KB, by ${d.created_by}, ${d.created_at})${d.description ? ` — ${d.description}` : ""}`;
+        return `"${d.key}" (${sizeKb} KB, by ${d.created_by}, ${d.created_at})${d.description ? ` -- ${d.description}` : ""}`;
       }).join("\n");
       return { content: [{ type: "text", text: `Shared data:\n${formatted}` }] };
     }
@@ -299,44 +306,97 @@ async function startHTTP(db) {
 
   const app = express();
   const PORT = parseInt(process.env.PORT) || 3000;
-  const API_TOKEN = process.env.MCP_API_KEY;
+  const saas = isSaasMode();
 
-  // Bearer token auth middleware (skip for health check)
-  app.use((req, res, next) => {
-    if (req.path === "/health" || req.path === "/readme") return next();
+  // --- SaaS setup (session, billing webhook with raw body, CSRF, routes) ---
+  if (saas) {
+    const { createSessionMiddleware, validateCsrf, extractApiKey, resolveTenant } = await import("./auth.mjs");
+    const { createWebhookHandler } = await import("./billing.mjs");
+    const { createBillingRouter } = await import("./billing.mjs");
+    const { createDashboardRouter } = await import("./dashboard.mjs");
+    const { createAdminRouter } = await import("./admin.mjs");
+    const { checkRateLimit, checkPlanLimits } = await import("./rate-limit.mjs");
 
-    if (API_TOKEN) {
-      const authHeader = req.headers.authorization || "";
-      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7)
-        : req.query.api_key || null;
-      if (!token || token !== API_TOKEN) {
-        return res.status(401).json({ error: "Unauthorized" });
+    // Stripe webhook MUST be registered before express.json() / urlencoded
+    app.post("/api/billing/webhook", express.raw({ type: "application/json" }), createWebhookHandler(db));
+
+    // Session middleware (needs body parsers for forms)
+    app.use(express.urlencoded({ extended: true }));
+    app.use(createSessionMiddleware(db.pool));
+    app.use(validateCsrf);
+
+    // Mount web UI routes
+    app.use(createDashboardRouter(db));
+    app.use(createBillingRouter(db));
+    app.use(createAdminRouter(db));
+
+    // --- MCP auth middleware: resolve API key -> tenant ---
+    const MCP_PATHS = ["/mcp", "/sse", "/messages"];
+
+    app.use(MCP_PATHS, async (req, res, next) => {
+      const apiKey = extractApiKey(req);
+      if (!apiKey) {
+        return res.status(401).json({ error: "API key required. Get one at /signup" });
       }
-    }
-    next();
-  });
+
+      const tenant = await resolveTenant(db, apiKey);
+      if (!tenant) {
+        return res.status(401).json({ error: "Invalid API key" });
+      }
+      if (tenant.status !== "active") {
+        return res.status(403).json({ error: "Account suspended" });
+      }
+
+      // Per-tenant rate limit
+      const rateCheck = checkRateLimit(tenant.id);
+      if (!rateCheck.allowed) {
+        return res.status(429).json({ error: rateCheck.message });
+      }
+
+      req.tenant = tenant;
+      req.tenantDb = new TenantDB(db, tenant.id);
+      next();
+    });
+
+    console.log("SaaS mode enabled: multi-tenant, billing, web UI");
+  } else {
+    // Non-SaaS: simple Bearer token auth
+    const API_TOKEN = process.env.MCP_API_KEY;
+    app.use((req, res, next) => {
+      if (req.path === "/health" || req.path === "/readme") return next();
+
+      if (API_TOKEN) {
+        const authHeader = req.headers.authorization || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7)
+          : req.query.api_key || null;
+        if (!token || token !== API_TOKEN) {
+          return res.status(401).json({ error: "Unauthorized" });
+        }
+      }
+      next();
+    });
+  }
 
   // --- Streamable HTTP transport (Claude.ai, Claude Code, Claude Desktop) ---
 
-  // Map of session ID -> { server, transport, cleanup }
   const sessions = new Map();
 
-  // POST /mcp — handle JSON-RPC messages
   app.post("/mcp", express.json(), async (req, res) => {
     const sessionId = req.headers["mcp-session-id"];
     let session = sessionId ? sessions.get(sessionId) : null;
 
     if (!session) {
-      // New session — create server + transport
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
       });
       const server = new McpServer({ name: "cross-claude-mcp", version: "2.0.0" });
-      const cleanup = registerTools(server, db);
+
+      // In SaaS mode, use tenant-scoped DB; otherwise use shared DB
+      const sessionDb = req.tenantDb || db;
+      const cleanup = registerTools(server, sessionDb);
 
       await server.connect(transport);
 
-      // Store session once we know its ID (after handleRequest sets it)
       const sessionEntry = { server, transport, cleanup };
 
       transport.onclose = () => {
@@ -349,7 +409,6 @@ async function startHTTP(db) {
 
       await transport.handleRequest(req, res, req.body);
 
-      // Now the transport has a session ID
       if (transport.sessionId) {
         sessions.set(transport.sessionId, sessionEntry);
       }
@@ -359,7 +418,6 @@ async function startHTTP(db) {
     await session.transport.handleRequest(req, res, req.body);
   });
 
-  // GET /mcp — SSE stream for Streamable HTTP
   app.get("/mcp", async (req, res) => {
     const sessionId = req.headers["mcp-session-id"];
     const session = sessionId ? sessions.get(sessionId) : null;
@@ -372,7 +430,6 @@ async function startHTTP(db) {
     await session.transport.handleRequest(req, res);
   });
 
-  // DELETE /mcp — close session
   app.delete("/mcp", async (req, res) => {
     const sessionId = req.headers["mcp-session-id"];
     const session = sessionId ? sessions.get(sessionId) : null;
@@ -392,7 +449,9 @@ async function startHTTP(db) {
   app.get("/sse", async (req, res) => {
     const transport = new SSEServerTransport("/messages", res);
     const server = new McpServer({ name: "cross-claude-mcp", version: "2.0.0" });
-    const cleanup = registerTools(server, db);
+
+    const sessionDb = req.tenantDb || db;
+    const cleanup = registerTools(server, sessionDb);
 
     sseTransports.set(transport.sessionId, { server, transport, cleanup });
 
@@ -426,7 +485,6 @@ async function startHTTP(db) {
     const __dirname = dirname(fileURLToPath(import.meta.url));
     const md = readFileSync(join(__dirname, "README.md"), "utf-8");
 
-    // Simple markdown-to-HTML conversion
     const escaped = md
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
       .replace(/^### (.+)$/gm, '<h3>$1</h3>')
@@ -457,6 +515,7 @@ li{margin:4px 0}</style></head>
       status: "ok",
       server: "cross-claude-mcp",
       version: "2.0.0",
+      mode: saas ? "saas" : "standard",
       sessions: sessions.size,
       sseSessions: sseTransports.size,
     });
@@ -466,10 +525,17 @@ li{margin:4px 0}</style></head>
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`cross-claude-mcp v2.0.0 listening on port ${PORT}`);
+    console.log(`  Mode:            ${saas ? "SaaS (multi-tenant)" : "Standard"}`);
     console.log(`  Streamable HTTP: POST/GET /mcp`);
     console.log(`  Legacy SSE:      GET /sse, POST /messages`);
     console.log(`  Health:          GET /health`);
-    console.log(`  Auth:            ${API_TOKEN ? "Bearer token required" : "NONE (set MCP_API_KEY)"}`);
+    if (saas) {
+      console.log(`  Web UI:          /signup, /login, /dashboard`);
+      console.log(`  Admin:           /admin`);
+      console.log(`  Billing webhook: POST /api/billing/webhook`);
+    } else {
+      console.log(`  Auth:            ${process.env.MCP_API_KEY ? "Bearer token required" : "NONE (set MCP_API_KEY)"}`);
+    }
     console.log(`  Database:        ${process.env.DATABASE_URL ? "PostgreSQL" : "SQLite (local)"}`);
   });
 }
