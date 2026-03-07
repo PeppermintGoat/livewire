@@ -103,16 +103,18 @@ li{margin:4px 0}</style></head>
 
   const API_TOKEN = process.env.MCP_API_KEY;
   app.use((req, res, next) => {
-    if (req.path === "/health" || req.path === "/readme" || req.path === "/openapi.json") return next();
+    if (req.path === "/health" || req.path === "/readme" || req.path.startsWith("/openapi.json")) return next();
 
     if (API_TOKEN) {
       const authHeader = req.headers.authorization || "";
       const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7)
         : req.query.api_key || null;
       if (!token || token !== API_TOKEN) {
+        console.log(`[AUTH FAIL] ${req.method} ${req.path} | auth header: "${authHeader.slice(0, 20)}..." | query api_key: ${req.query.api_key ? "present" : "absent"}`);
         return res.status(401).json({ error: "Unauthorized" });
       }
     }
+    console.log(`[AUTH OK] ${req.method} ${req.path}`);
     next();
   });
 
