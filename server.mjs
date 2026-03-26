@@ -111,7 +111,7 @@ li{margin:4px 0}</style></head>
         : req.query.api_key || null;
       if (!token || token !== API_TOKEN) {
         console.log(`[AUTH FAIL] ${req.method} ${req.path} | auth header: "${authHeader.slice(0, 20)}..." | query api_key: ${req.query.api_key ? "present" : "absent"}`);
-        return res.status(401).json({ error: "Unauthorized" });
+        return res.status(403).json({ error: "Forbidden: invalid API key" });
       }
     }
     console.log(`[AUTH OK] ${req.method} ${req.path}`);
