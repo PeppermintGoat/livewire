@@ -171,39 +171,59 @@ export function registerTools(server, db, planChecker = null) {
 
   server.tool(
     "wait_for_reply",
-    "Poll a channel until a new message arrives from another instance, or until timeout. Stops early on 'done' messages.",
+    "Poll a channel until a new message arrives from another instance. Persistent by default — keeps listening across multiple poll cycles until a message arrives, a 'done' signal is received, or max_wait_minutes is reached. Pass persistent: false for one-shot polling (original behavior).",
     {
       channel: z.string().default("general").describe("Channel to poll"),
       after_id: z.number().describe("Only look for messages after this ID"),
       instance_id: z.string().describe("Your instance_id (filters out your own messages)"),
-      timeout_seconds: z.number().default(90).describe("Max seconds to wait (default: 90)"),
-      poll_interval_seconds: z.number().default(5).describe("Seconds between polls (default: 5)"),
+      timeout_seconds: z.number().default(90).describe("Seconds per poll cycle (default: 90)"),
+      poll_interval_seconds: z.number().default(5).describe("Seconds between polls within a cycle (default: 5)"),
+      persistent: z.boolean().default(true).describe("Keep listening across poll cycles until a message arrives (default: true). Pass false for one-shot polling."),
+      max_wait_minutes: z.number().default(30).describe("Hard ceiling in minutes for persistent mode (default: 30)"),
     },
-    async ({ channel, after_id, instance_id, timeout_seconds, poll_interval_seconds }) => {
+    async ({ channel, after_id, instance_id, timeout_seconds, poll_interval_seconds, persistent, max_wait_minutes }) => {
       const normalized = normalizeChannelName(channel);
-      const deadline = Date.now() + timeout_seconds * 1000;
+      const start = Date.now();
+      const hardDeadline = start + max_wait_minutes * 60 * 1000;
 
-      while (Date.now() < deadline) {
-        touchHeartbeat();
-        const messages = await db.getUnread(normalized, after_id, instance_id);
+      while (true) {
+        const cycleDeadline = Date.now() + timeout_seconds * 1000;
 
-        if (messages.length > 0) {
-          const hasDone = messages.some((m) => m.message_type === "done");
-          const formatted = messages.map((m) =>
-            `#${m.id} [${m.message_type}] ${m.sender} (${m.created_at})${m.in_reply_to ? ` (reply to #${m.in_reply_to})` : ""}:\n${m.content}`
-          ).join("\n\n---\n\n");
-          const lastId = messages[messages.length - 1].id;
+        while (Date.now() < cycleDeadline && Date.now() < hardDeadline) {
+          touchHeartbeat();
+          const messages = await db.getUnread(normalized, after_id, instance_id);
+
+          if (messages.length > 0) {
+            const hasDone = messages.some((m) => m.message_type === "done");
+            const formatted = messages.map((m) =>
+              `#${m.id} [${m.message_type}] ${m.sender} (${m.created_at})${m.in_reply_to ? ` (reply to #${m.in_reply_to})` : ""}:\n${m.content}`
+            ).join("\n\n---\n\n");
+            const lastId = messages[messages.length - 1].id;
+            return {
+              content: [{ type: "text", text: `${messages.length} new message(s) in #${normalized}:\n\n${formatted}\n\n---\nLast message ID: ${lastId}${hasDone ? "\n\nThe other instance signaled DONE -- no further replies expected." : ""}` }],
+            };
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, poll_interval_seconds * 1000));
+        }
+
+        // Cycle finished with no messages
+        if (!persistent) {
           return {
-            content: [{ type: "text", text: `${messages.length} new message(s) in #${normalized}:\n\n${formatted}\n\n---\nLast message ID: ${lastId}${hasDone ? "\n\nThe other instance signaled DONE -- no further replies expected." : ""}` }],
+            content: [{ type: "text", text: `No new messages in #${normalized} after waiting ${timeout_seconds}s. The other instance may be busy or offline. You can try again or check list_instances.` }],
           };
         }
 
-        await new Promise((resolve) => setTimeout(resolve, poll_interval_seconds * 1000));
-      }
+        // Persistent mode: check hard ceiling
+        if (Date.now() >= hardDeadline) {
+          const elapsed = Math.round((Date.now() - start) / 60000);
+          return {
+            content: [{ type: "text", text: `No new messages in #${normalized} after ${elapsed} minute(s). Call wait_for_reply again to keep listening, or disconnect.` }],
+          };
+        }
 
-      return {
-        content: [{ type: "text", text: `No new messages in #${normalized} after waiting ${timeout_seconds}s. The other instance may be busy or offline. You can try again or check list_instances.` }],
-      };
+        // Persistent mode: restart cycle (no message to Claude — just keep polling)
+      }
     }
   );
 

@@ -300,9 +300,45 @@ async function runTests() {
         instance_id: "test-alice",
         timeout_seconds: 2,
         poll_interval_seconds: 1,
+        persistent: false,
       },
     });
     assert(timeoutResp.result.content[0].text.includes("No new messages"), "Timeout returns appropriate message");
+
+    // 15b. wait_for_reply — persistent mode (default) respects max_wait_minutes ceiling
+    console.log("\n15b. wait_for_reply (persistent mode with short max_wait_minutes)");
+    const persistResp = await send("tools/call", {
+      name: "wait_for_reply",
+      arguments: {
+        channel: "general",
+        after_id: currentLastId,
+        instance_id: "test-alice",
+        timeout_seconds: 2,
+        poll_interval_seconds: 1,
+        persistent: true,
+        max_wait_minutes: 0.1,  // 6 seconds hard ceiling
+      },
+    });
+    const persistText = persistResp.result.content[0].text;
+    assert(persistText.includes("Call wait_for_reply again to keep listening"), "Persistent mode returns ceiling message");
+    assert(!persistText.includes("may be busy or offline"), "Persistent mode does NOT use the old timeout message");
+
+    // 15c. wait_for_reply — temporary mode (persistent: false) preserves old behavior
+    console.log("\n15c. wait_for_reply (temporary mode)");
+    const tempResp = await send("tools/call", {
+      name: "wait_for_reply",
+      arguments: {
+        channel: "general",
+        after_id: currentLastId,
+        instance_id: "test-alice",
+        timeout_seconds: 2,
+        poll_interval_seconds: 1,
+        persistent: false,
+      },
+    });
+    const tempText = tempResp.result.content[0].text;
+    assert(tempText.includes("No new messages"), "Temporary mode returns no-messages");
+    assert(tempText.includes("may be busy or offline"), "Temporary mode uses the old timeout message");
 
     // 16. done message type
     console.log("\n16. Done message type");
