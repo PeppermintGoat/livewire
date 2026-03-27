@@ -135,7 +135,7 @@ Channel discipline:
 - Before creating a new channel, check if a suitable one already exists.
 
 Message protocol:
-- After sending a message that asks a question or expects a reply, poll for new messages using getMessages with the after_id from your last check. Wait 10-15 seconds between polls. Poll up to 5 times before telling the user no reply yet.
+- After sending a message that asks a question or expects a reply, poll for new messages using getMessages with the after_id from your last check. Wait 10-15 seconds between polls. Keep polling for up to 30 minutes — the other instance may be working on a complex task. Only stop polling when you receive a "done" message or the user tells you to stop.
 - When you receive a message with message_type "done", stop polling — the other instance is finished.
 - When you're done with a conversation thread, send a message with message_type "done" so other instances stop waiting for you.
 - Use message_type "request" when asking for something, "response" when answering, "status" for progress updates.
@@ -296,11 +296,36 @@ cd cross-claude-mcp
 npm test
 ```
 
-## Recommended CLAUDE.md Instructions
+## Getting the Best Behavior
 
-After installing, add the following to your `CLAUDE.md` (global or project-level) so Claude knows how to use cross-claude effectively. Copy this block as-is:
+Cross-Claude works out of the box, but AI assistants collaborate better with behavioral guidance. Three ways to get it, ordered by preference:
 
-```markdown
+### Option 1: Superpowers Skill (Claude Code)
+
+If you use the [superpowers](https://github.com/anthropics/claude-code-plugins) plugin for Claude Code, install the skill:
+
+```bash
+mkdir -p ~/.claude/skills/cross-claude
+ln -s /path/to/cross-claude-mcp/skill/SKILL.md ~/.claude/skills/cross-claude/SKILL.md
+```
+
+The skill auto-triggers when Cross-Claude tools are used. It enforces:
+- Session startup sequence (register → list channels → pick channel → check messages)
+- Channel discipline (never default to `general`, check before creating)
+- Persistent connections (stay connected until `done` or user says disconnect)
+- Done signal enforcement (always send `done` when finished)
+
+### Option 2: MCP Prompt (Automatic)
+
+The server exposes a `cross-claude-protocol` prompt via MCP. Any connected client (Claude Desktop, Claude.ai, Claude Code) can access it automatically — no setup needed.
+
+To use it, ask your AI assistant to "get the cross-claude-protocol prompt" or it may be loaded automatically depending on your client.
+
+### Option 3: CLAUDE.md (Manual Fallback)
+
+If neither option above works for your setup, add the following to your `CLAUDE.md` (global or project-level). Copy this block as-is:
+
+````markdown
 ### Cross-Claude MCP — Inter-Instance Communication
 
 The **cross-claude** MCP server lets multiple Claude instances communicate via a shared message bus.
@@ -327,7 +352,14 @@ The **cross-claude** MCP server lets multiple Claude instances communicate via a
 - For large data (>500 chars), use `share_data` to store it by key, then send a short message referencing the key
 - Use descriptive `message_type` values: `request` (asking), `response` (answering), `handoff` (passing work), `status` (progress), `done` (finished)
 - Keep your `instance_id` consistent within a session — don't re-register mid-conversation
-```
+
+#### Connection behavior:
+- `wait_for_reply` is persistent by default — it keeps listening until a message arrives or 30 minutes elapse
+- Do NOT treat silence as disconnection — the other instance may be working on a complex task
+- If `wait_for_reply` returns after the max wait time, call it again to keep listening unless the user says to disconnect
+- For quick one-shot messages, pass `persistent: false` to `wait_for_reply`
+- Only stop listening when: you receive a `done` message, the user says to disconnect, or you've sent your own `done`
+````
 
 ## Architecture
 
