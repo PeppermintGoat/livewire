@@ -34,6 +34,14 @@ const SCHEMA_SQL = `
     description TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS invite_codes (
+    code TEXT PRIMARY KEY,
+    label TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    used_at TIMESTAMP,
+    used_by TEXT
+  );
 `;
 
 const INDEX_SQL = `
@@ -235,6 +243,22 @@ class SqliteDB {
     this.db.prepare(`DELETE FROM messages`).run();
     this.db.prepare(`DELETE FROM instances`).run();
     this.db.prepare(`DELETE FROM shared_data`).run();
+  }
+
+  createInviteCode(code, label) {
+    this.db.prepare(`INSERT INTO invite_codes (code, label) VALUES (?, ?)`).run(code, label);
+  }
+
+  redeemInviteCode(code) {
+    const row = this.db.prepare(`SELECT * FROM invite_codes WHERE code = ?`).get(code);
+    if (!row) return null;
+    if (row.used_at) return null;
+    this.db.prepare(`UPDATE invite_codes SET used_at = datetime('now'), used_by = 'oauth' WHERE code = ?`).run(code);
+    return row;
+  }
+
+  listInviteCodes() {
+    return this.db.prepare(`SELECT * FROM invite_codes ORDER BY created_at DESC`).all();
   }
 }
 
@@ -439,6 +463,24 @@ class PostgresDB {
     await this.pool.query(`DELETE FROM messages`);
     await this.pool.query(`DELETE FROM instances`);
     await this.pool.query(`DELETE FROM shared_data`);
+  }
+
+  async createInviteCode(code, label) {
+    await this.pool.query(`INSERT INTO invite_codes (code, label) VALUES ($1, $2)`, [code, label]);
+  }
+
+  async redeemInviteCode(code) {
+    const result = await this.pool.query(`SELECT * FROM invite_codes WHERE code = $1`, [code]);
+    const row = result.rows[0];
+    if (!row) return null;
+    if (row.used_at) return null;
+    await this.pool.query(`UPDATE invite_codes SET used_at = NOW(), used_by = 'oauth' WHERE code = $1`, [code]);
+    return row;
+  }
+
+  async listInviteCodes() {
+    const result = await this.pool.query(`SELECT * FROM invite_codes ORDER BY created_at DESC`);
+    return result.rows;
   }
 }
 

@@ -19,6 +19,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createDB } from "./db.mjs";
 import { registerTools } from "./tools.mjs";
 import { createRestRouter } from "./rest-api.mjs";
+import { InviteCodeOAuthProvider, createAuthorizeSubmitHandler } from "./auth.mjs";
 
 // --- Transport: Stdio (local) ---
 
@@ -48,6 +49,41 @@ async function startHTTP(db) {
 
   const app = express();
   const PORT = parseInt(process.env.PORT) || 3000;
+
+  // --- CORS (required for Claude Desktop custom connectors) ---
+
+  app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id");
+    res.header("Access-Control-Expose-Headers", "Mcp-Session-Id");
+    if (req.method === "OPTIONS") return res.sendStatus(204);
+    next();
+  });
+
+  // --- OAuth 2.1 (for Claude Desktop custom connectors) ---
+
+  const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+  const oauthProvider = new InviteCodeOAuthProvider(db);
+
+  const { mcpAuthRouter } = await import("@modelcontextprotocol/sdk/server/auth/router.js");
+  const { requireBearerAuth } = await import("@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js");
+  const { getOAuthProtectedResourceMetadataUrl } = await import("@modelcontextprotocol/sdk/server/auth/router.js");
+
+  app.use(mcpAuthRouter({
+    provider: oauthProvider,
+    issuerUrl: new URL(SERVER_URL),
+    resourceServerUrl: new URL("/mcp", SERVER_URL),
+    scopesSupported: [],
+    resourceName: "Cross-Claude MCP",
+    serviceDocumentationUrl: new URL("/readme", SERVER_URL),
+  }));
+
+  // Invite code form submission (url-encoded form POST)
+  const urlencoded = (await import("express")).default.urlencoded({ extended: false });
+  app.post("/authorize/submit", urlencoded, createAuthorizeSubmitHandler(db));
+
+  const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(new URL("/mcp", SERVER_URL));
 
   // --- Health check + README (no auth) ---
 
@@ -99,22 +135,48 @@ li{margin:4px 0}</style></head>
     res.type("json").send(readFileSync(join(__dirname, "openapi.json"), "utf-8"));
   });
 
-  // --- Bearer token auth ---
+  // --- Auth: static API key (CLI/REST) OR OAuth bearer token (Claude Desktop) ---
 
   const API_TOKEN = process.env.MCP_API_KEY;
-  app.use((req, res, next) => {
-    if (req.path === "/health" || req.path === "/readme" || req.path.startsWith("/openapi.json")) return next();
 
+  const oauthBearerAuth = requireBearerAuth({
+    verifier: oauthProvider,
+    resourceMetadataUrl,
+  });
+
+  app.use((req, res, next) => {
+    // Skip auth for public endpoints
+    if (req.path === "/health" || req.path === "/readme" || req.path.startsWith("/openapi.json")) return next();
+    // Skip auth for OAuth endpoints (handled by mcpAuthRouter)
+    if (req.path.startsWith("/.well-known/") || req.path === "/authorize" || req.path === "/authorize/submit" || req.path === "/token" || req.path === "/register" || req.path === "/revoke") return next();
+
+    const authHeader = req.headers.authorization || "";
+
+    // Try static API key first
     if (API_TOKEN) {
-      const authHeader = req.headers.authorization || "";
-      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7)
-        : req.query.api_key || null;
-      if (!token || token !== API_TOKEN) {
-        console.log(`[AUTH FAIL] ${req.method} ${req.path} | auth header: "${authHeader.slice(0, 20)}..." | query api_key: ${req.query.api_key ? "present" : "absent"}`);
-        return res.status(403).json({ error: "Forbidden: invalid API key" });
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : req.query.api_key || null;
+      if (token && token === API_TOKEN) {
+        console.log(`[AUTH OK] ${req.method} ${req.path} (api-key)`);
+        return next();
       }
     }
-    console.log(`[AUTH OK] ${req.method} ${req.path}`);
+
+    // Try OAuth bearer token
+    if (authHeader.startsWith("Bearer ")) {
+      return oauthBearerAuth(req, res, (err) => {
+        if (err) return next(err);
+        console.log(`[AUTH OK] ${req.method} ${req.path} (oauth)`);
+        next();
+      });
+    }
+
+    // No valid auth
+    if (API_TOKEN) {
+      console.log(`[AUTH FAIL] ${req.method} ${req.path}`);
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    // No API_TOKEN configured — allow all (dev mode)
     next();
   });
 
@@ -246,6 +308,7 @@ li{margin:4px 0}</style></head>
     console.log(`  Legacy SSE:      GET /sse, POST /messages`);
     console.log(`  Health:          GET /health`);
     console.log(`  Auth:            ${process.env.MCP_API_KEY ? "Bearer token required" : "NONE (set MCP_API_KEY)"}`);
+    console.log(`  OAuth:           ${SERVER_URL}/.well-known/oauth-authorization-server`);
     console.log(`  Database:        ${process.env.DATABASE_URL ? "PostgreSQL" : "SQLite (local)"}`);
     console.log(`  Cleanup:         Every ${CLEANUP_DAYS} days (checks hourly)`);
   });
