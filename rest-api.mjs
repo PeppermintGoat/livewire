@@ -32,7 +32,7 @@ export function createRestRouter(db) {
     try {
       const { instance_id, description } = req.body;
       if (!instance_id) return res.status(400).json({ error: "instance_id is required" });
-      await db.registerInstance(instance_id, description || null);
+      await db.registerInstance(instance_id, description || null, null);
       res.json({ ok: true, instance_id });
     } catch (e) { next(e); }
   });

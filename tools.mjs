@@ -4,6 +4,7 @@
  */
 
 import { z } from "zod";
+import { randomUUID } from "crypto";
 import { normalizeChannelName } from "./db.mjs";
 
 export const STALE_THRESHOLD_SECONDS = 120;
@@ -33,6 +34,7 @@ function levenshteinClose(a, b) {
  */
 export function registerTools(server, db, planChecker = null) {
   let currentInstanceId = null;
+  const sessionToken = randomUUID();
 
   function touchHeartbeat() {
     if (!currentInstanceId) return;
@@ -41,7 +43,7 @@ export function registerTools(server, db, planChecker = null) {
 
   server.tool(
     "register",
-    "Register this Claude Code instance with an identity. Call this first before using other tools.",
+    "Register this Claude Code instance with an identity. Call this first before using other tools. Each instance_id must be unique — if another active session already owns that ID, you'll be asked to pick a different name.",
     {
       instance_id: z.string().describe("Unique name for this instance (e.g., 'alice', 'builder', 'reviewer')"),
       description: z.string().optional().describe("What this instance is working on"),
@@ -51,11 +53,24 @@ export function registerTools(server, db, planChecker = null) {
         const check = await planChecker("register");
         if (!check.allowed) return { content: [{ type: "text", text: check.message }] };
       }
+
+      // Check for duplicate registration by a different session
+      const existing = await db.getInstance(instance_id);
+      if (existing && existing.session_token && existing.session_token !== sessionToken) {
+        const lastSeen = new Date(existing.last_seen);
+        const secondsAgo = (Date.now() - lastSeen.getTime()) / 1000;
+        if (existing.status === "online" && secondsAgo < STALE_THRESHOLD_SECONDS) {
+          return {
+            content: [{ type: "text", text: `❌ Instance ID "${instance_id}" is already in use by another active session (last seen ${Math.round(secondsAgo)}s ago)${existing.description ? `: ${existing.description}` : ""}.\n\nPick a different name to avoid message conflicts. For example: "${instance_id}-2", "${instance_id}-${Date.now().toString(36).slice(-4)}", or a descriptive name like "${instance_id}-reviewer".` }],
+          };
+        }
+      }
+
       if (currentInstanceId && currentInstanceId !== instance_id) {
         await db.markOffline(currentInstanceId);
       }
       currentInstanceId = instance_id;
-      await db.registerInstance(instance_id, description || null);
+      await db.registerInstance(instance_id, description || null, sessionToken);
 
       // Provide context: active channels and online instances
       const channels = await db.listChannelsWithActivity();

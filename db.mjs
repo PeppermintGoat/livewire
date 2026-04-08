@@ -24,7 +24,8 @@ const SCHEMA_SQL = `
     instance_id TEXT PRIMARY KEY,
     description TEXT,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    status TEXT DEFAULT 'online'
+    status TEXT DEFAULT 'online',
+    session_token TEXT
   );
 
   CREATE TABLE IF NOT EXISTS shared_data (
@@ -49,6 +50,10 @@ const INDEX_SQL = `
   CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
   CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
 `;
+
+// Migration: add session_token column to existing instances tables
+const MIGRATION_SESSION_TOKEN_PG = `ALTER TABLE instances ADD COLUMN IF NOT EXISTS session_token TEXT`;
+const MIGRATION_SESSION_TOKEN_SQLITE = `ALTER TABLE instances ADD COLUMN session_token TEXT`;
 
 /**
  * Normalize channel names: lowercase, replace spaces/underscores with hyphens,
@@ -81,18 +86,25 @@ class SqliteDB {
       .replace(/TIMESTAMP DEFAULT CURRENT_TIMESTAMP/g, "TEXT DEFAULT (datetime('now'))");
     this.db.exec(sqliteSchema);
     this.db.exec(INDEX_SQL);
+    // Migration: add session_token if missing (existing databases)
+    try { this.db.exec(MIGRATION_SESSION_TOKEN_SQLITE); } catch { /* column already exists */ }
     this.db.prepare(`INSERT OR IGNORE INTO channels (name, description) VALUES ('general', 'Default channel for cross-instance communication')`).run();
   }
 
-  registerInstance(instanceId, description) {
+  getInstance(instanceId) {
+    return this.db.prepare(`SELECT * FROM instances WHERE instance_id = ?`).get(instanceId);
+  }
+
+  registerInstance(instanceId, description, sessionToken) {
     this.db.prepare(
-      `INSERT INTO instances (instance_id, description, last_seen, status)
-       VALUES (?, ?, datetime('now'), 'online')
+      `INSERT INTO instances (instance_id, description, last_seen, status, session_token)
+       VALUES (?, ?, datetime('now'), 'online', ?)
        ON CONFLICT(instance_id) DO UPDATE SET
          description = excluded.description,
          last_seen = datetime('now'),
-         status = 'online'`
-    ).run(instanceId, description);
+         status = 'online',
+         session_token = excluded.session_token`
+    ).run(instanceId, description, sessionToken);
   }
 
   heartbeat(instanceId) {
@@ -275,17 +287,25 @@ class PostgresDB {
     await this.pool.query(SCHEMA_SQL);
     await this.pool.query(INDEX_SQL);
     await this.pool.query(SEED_SQL);
+    // Migration: add session_token if missing (existing databases)
+    await this.pool.query(MIGRATION_SESSION_TOKEN_PG).catch(() => {});
   }
 
-  async registerInstance(instanceId, description) {
+  async getInstance(instanceId) {
+    const result = await this.pool.query(`SELECT * FROM instances WHERE instance_id = $1`, [instanceId]);
+    return result.rows[0] || null;
+  }
+
+  async registerInstance(instanceId, description, sessionToken) {
     await this.pool.query(
-      `INSERT INTO instances (instance_id, description, last_seen, status)
-       VALUES ($1, $2, NOW(), 'online')
+      `INSERT INTO instances (instance_id, description, last_seen, status, session_token)
+       VALUES ($1, $2, NOW(), 'online', $3)
        ON CONFLICT(instance_id) DO UPDATE SET
          description = EXCLUDED.description,
          last_seen = NOW(),
-         status = 'online'`,
-      [instanceId, description]
+         status = 'online',
+         session_token = EXCLUDED.session_token`,
+      [instanceId, description, sessionToken]
     );
   }
 
