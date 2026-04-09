@@ -196,16 +196,44 @@ export function registerTools(server, db, planChecker = null) {
       persistent: z.boolean().default(true).describe("Keep listening across poll cycles until a message arrives (default: true). Pass false for one-shot polling."),
       max_wait_minutes: z.number().default(30).describe("Hard ceiling in minutes for persistent mode (default: 30)"),
     },
-    async ({ channel, after_id, instance_id, timeout_seconds, poll_interval_seconds, persistent, max_wait_minutes }) => {
+    async ({ channel, after_id, instance_id, timeout_seconds, poll_interval_seconds, persistent, max_wait_minutes }, extra) => {
       const normalized = normalizeChannelName(channel);
       const start = Date.now();
       const hardDeadline = start + max_wait_minutes * 60 * 1000;
+      const KEEPALIVE_INTERVAL_MS = 30_000; // Send SSE keepalive every 30s to prevent proxy timeout
+      let lastKeepalive = Date.now();
+      let pollCount = 0;
+
+      async function sendKeepalive() {
+        if (!extra?.sendNotification) return;
+        const elapsed = Math.round((Date.now() - start) / 1000);
+        try {
+          if (extra._meta?.progressToken !== undefined) {
+            await extra.sendNotification({
+              method: "notifications/progress",
+              params: {
+                progressToken: extra._meta.progressToken,
+                progress: elapsed,
+                total: max_wait_minutes * 60,
+                message: `Polling #${normalized} (${elapsed}s, ${pollCount} checks)`,
+              },
+            });
+          } else {
+            await extra.sendNotification({
+              method: "notifications/message",
+              params: { level: "debug", data: `Polling #${normalized} (${elapsed}s, ${pollCount} checks)`, logger: "wait_for_reply" },
+            });
+          }
+        } catch { /* connection may already be dead — ignore */ }
+        lastKeepalive = Date.now();
+      }
 
       while (true) {
         const cycleDeadline = Date.now() + timeout_seconds * 1000;
 
         while (Date.now() < cycleDeadline && Date.now() < hardDeadline) {
           touchHeartbeat();
+          pollCount++;
           const messages = await db.getUnread(normalized, after_id, instance_id);
 
           if (messages.length > 0) {
@@ -217,6 +245,11 @@ export function registerTools(server, db, planChecker = null) {
             return {
               content: [{ type: "text", text: `${messages.length} new message(s) in #${normalized}:\n\n${formatted}\n\n---\nLast message ID: ${lastId}${hasDone ? "\n\nThe other instance signaled DONE -- no further replies expected." : ""}` }],
             };
+          }
+
+          // Keep SSE stream alive through proxies (Railway, mcp-remote)
+          if (Date.now() - lastKeepalive >= KEEPALIVE_INTERVAL_MS) {
+            await sendKeepalive();
           }
 
           await new Promise((resolve) => setTimeout(resolve, poll_interval_seconds * 1000));
@@ -237,7 +270,8 @@ export function registerTools(server, db, planChecker = null) {
           };
         }
 
-        // Persistent mode: restart cycle (no message to Claude — just keep polling)
+        // Persistent mode: restart cycle — send keepalive before restarting
+        await sendKeepalive();
       }
     }
   );
