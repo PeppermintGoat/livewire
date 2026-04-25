@@ -78,19 +78,47 @@ export function createRestRouter(db) {
 
   router.post("/messages", async (req, res, next) => {
     try {
-      const { channel = "general", sender, content, message_type = "message", in_reply_to } = req.body;
+      const { channel = "general", sender, content, message_type = "message", in_reply_to, created_at } = req.body;
       if (!sender) return res.status(400).json({ error: "sender is required" });
       if (!content) return res.status(400).json({ error: "content is required" });
       const validTypes = ["message", "request", "response", "status", "handoff", "done"];
       if (!validTypes.includes(message_type)) {
         return res.status(400).json({ error: `message_type must be one of: ${validTypes.join(", ")}` });
       }
+      // Validate optional created_at — must parse as a real date
+      if (created_at !== undefined && created_at !== null) {
+        const ts = new Date(created_at);
+        if (isNaN(ts.getTime())) {
+          return res.status(400).json({ error: "created_at must be a valid ISO 8601 date string" });
+        }
+      }
       const normalized = normalizeChannelName(channel);
       if (!normalized) return res.status(400).json({ error: `Invalid channel name "${channel}"` });
       // Auto-create channel if it doesn't exist
       await db.createChannel(normalized, null);
-      const id = await db.sendMessage(normalized, sender, content, message_type, in_reply_to || null);
+      const id = await db.sendMessage(normalized, sender, content, message_type, in_reply_to || null, created_at || null);
       res.json({ ok: true, id: Number(id), channel: normalized, message_type });
+    } catch (e) { next(e); }
+  });
+
+  router.delete("/channels/:name", async (req, res, next) => {
+    try {
+      const { name } = req.params;
+      const normalized = normalizeChannelName(name);
+      if (!normalized) return res.status(400).json({ error: `Invalid channel name "${name}"` });
+      const deleted = await db.deleteChannel(normalized);
+      if (!deleted) return res.status(404).json({ error: `Channel "${normalized}" not found` });
+      res.json({ ok: true, deleted: normalized });
+    } catch (e) { next(e); }
+  });
+
+  router.delete("/messages/:channel/:id", async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "id must be a number" });
+      const deleted = await db.deleteMessage(id);
+      if (!deleted) return res.status(404).json({ error: `Message #${id} not found` });
+      res.json({ ok: true, deleted: id });
     } catch (e) { next(e); }
   });
 

@@ -170,11 +170,36 @@ class SqliteDB {
     `).all(pattern, pattern);
   }
 
-  sendMessage(channel, sender, content, messageType, inReplyTo) {
+  sendMessage(channel, sender, content, messageType, inReplyTo, createdAt) {
+    if (createdAt) {
+      const result = this.db.prepare(
+        `INSERT INTO messages (channel, sender, content, message_type, in_reply_to, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(channel, sender, content, messageType, inReplyTo, createdAt);
+      return result.lastInsertRowid;
+    }
     const result = this.db.prepare(
       `INSERT INTO messages (channel, sender, content, message_type, in_reply_to) VALUES (?, ?, ?, ?, ?)`
     ).run(channel, sender, content, messageType, inReplyTo);
     return result.lastInsertRowid;
+  }
+
+  deleteChannel(name) {
+    const exists = this.db.prepare(`SELECT 1 FROM channels WHERE name = ?`).get(name);
+    if (!exists) return false;
+    // Orphan any replies (across channels) that reference messages in this channel
+    this.db.prepare(`UPDATE messages SET in_reply_to = NULL WHERE in_reply_to IN (SELECT id FROM messages WHERE channel = ?)`).run(name);
+    this.db.prepare(`DELETE FROM messages WHERE channel = ?`).run(name);
+    this.db.prepare(`DELETE FROM channels WHERE name = ?`).run(name);
+    return true;
+  }
+
+  deleteMessage(id) {
+    const exists = this.db.prepare(`SELECT 1 FROM messages WHERE id = ?`).get(id);
+    if (!exists) return false;
+    // Orphan replies so they don't violate FK
+    this.db.prepare(`UPDATE messages SET in_reply_to = NULL WHERE in_reply_to = ?`).run(id);
+    this.db.prepare(`DELETE FROM messages WHERE id = ?`).run(id);
+    return true;
   }
 
   getMessages(channel, limit) {
@@ -380,12 +405,38 @@ class PostgresDB {
     return result.rows;
   }
 
-  async sendMessage(channel, sender, content, messageType, inReplyTo) {
+  async sendMessage(channel, sender, content, messageType, inReplyTo, createdAt) {
+    if (createdAt) {
+      const result = await this.pool.query(
+        `INSERT INTO messages (channel, sender, content, message_type, in_reply_to, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [channel, sender, content, messageType, inReplyTo, createdAt]
+      );
+      return result.rows[0].id;
+    }
     const result = await this.pool.query(
       `INSERT INTO messages (channel, sender, content, message_type, in_reply_to) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
       [channel, sender, content, messageType, inReplyTo]
     );
     return result.rows[0].id;
+  }
+
+  async deleteChannel(name) {
+    const exists = await this.pool.query(`SELECT 1 FROM channels WHERE name = $1`, [name]);
+    if (exists.rowCount === 0) return false;
+    // Orphan any replies (across channels) that reference messages in this channel
+    await this.pool.query(`UPDATE messages SET in_reply_to = NULL WHERE in_reply_to IN (SELECT id FROM messages WHERE channel = $1)`, [name]);
+    await this.pool.query(`DELETE FROM messages WHERE channel = $1`, [name]);
+    await this.pool.query(`DELETE FROM channels WHERE name = $1`, [name]);
+    return true;
+  }
+
+  async deleteMessage(id) {
+    const exists = await this.pool.query(`SELECT 1 FROM messages WHERE id = $1`, [id]);
+    if (exists.rowCount === 0) return false;
+    // Orphan replies so they don't violate FK
+    await this.pool.query(`UPDATE messages SET in_reply_to = NULL WHERE in_reply_to = $1`, [id]);
+    await this.pool.query(`DELETE FROM messages WHERE id = $1`, [id]);
+    return true;
   }
 
   async getMessages(channel, limit) {
