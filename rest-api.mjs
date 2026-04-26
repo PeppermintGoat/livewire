@@ -76,6 +76,11 @@ export function createRestRouter(db) {
 
   // --- Messages ---
 
+  // Rate limit: 8 messages per sender per 30 min window. System pings exempt.
+  const RATE_LIMIT_MAX = 8;
+  const RATE_LIMIT_WINDOW_MIN = 30;
+  const RATE_LIMIT_EXEMPT = new Set(["__auth_check__"]);
+
   router.post("/messages", async (req, res, next) => {
     try {
       const { channel = "general", sender, content, message_type = "message", in_reply_to, created_at } = req.body;
@@ -90,6 +95,21 @@ export function createRestRouter(db) {
         const ts = new Date(created_at);
         if (isNaN(ts.getTime())) {
           return res.status(400).json({ error: "created_at must be a valid ISO 8601 date string" });
+        }
+      }
+      // Rate limit (skip for migration writes that pass created_at, and skip exempt senders)
+      if (!RATE_LIMIT_EXEMPT.has(sender) && !created_at) {
+        const sinceTime = new Date(Date.now() - RATE_LIMIT_WINDOW_MIN * 60 * 1000).toISOString();
+        const recent = await db.countMessagesSince(sender, sinceTime);
+        if (recent >= RATE_LIMIT_MAX) {
+          return res.status(429).json({
+            error: "rate_limited",
+            message: `Sender "${sender}" sent ${recent} messages in the last ${RATE_LIMIT_WINDOW_MIN} min (limit: ${RATE_LIMIT_MAX}). Try again later.`,
+            sender,
+            recent_count: recent,
+            limit: RATE_LIMIT_MAX,
+            window_minutes: RATE_LIMIT_WINDOW_MIN
+          });
         }
       }
       const normalized = normalizeChannelName(channel);

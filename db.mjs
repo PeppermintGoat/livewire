@@ -202,6 +202,13 @@ class SqliteDB {
     return true;
   }
 
+  countMessagesSince(sender, sinceIsoTime) {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) as cnt FROM messages WHERE sender = ? AND created_at >= ?`
+    ).get(sender, sinceIsoTime);
+    return row.cnt;
+  }
+
   getMessages(channel, limit) {
     return this.db.prepare(
       `SELECT m.*, (SELECT COUNT(*) FROM messages r WHERE r.in_reply_to = m.id) as reply_count
@@ -437,6 +444,14 @@ class PostgresDB {
     await this.pool.query(`UPDATE messages SET in_reply_to = NULL WHERE in_reply_to = $1`, [id]);
     await this.pool.query(`DELETE FROM messages WHERE id = $1`, [id]);
     return true;
+  }
+
+  async countMessagesSince(sender, sinceIsoTime) {
+    const result = await this.pool.query(
+      `SELECT COUNT(*)::int as cnt FROM messages WHERE sender = $1 AND created_at >= $2`,
+      [sender, sinceIsoTime]
+    );
+    return result.rows[0].cnt;
   }
 
   async getMessages(channel, limit) {
